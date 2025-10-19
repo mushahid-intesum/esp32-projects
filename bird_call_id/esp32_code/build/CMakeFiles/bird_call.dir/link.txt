@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/bird_call.dir/src/main.cpp.o -o bird_call  -lexecutorch -lextension_module_static -lextension_flat_tensor -lextension_tensor -loptimized_native_cpu_ops_lib -lxnnpack_backend -lc10 -ltorch 

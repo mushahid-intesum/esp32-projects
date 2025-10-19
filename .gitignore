@@ -6,3 +6,4 @@
 *.tflite
 *.pte
 *.pth
+*.h5
