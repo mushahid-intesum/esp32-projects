@@ -1,0 +1,8 @@
+.vscode
+*.ogg
+*.csv
+*.img
+*.png
+*.tflite
+*.pte
+*.pth
