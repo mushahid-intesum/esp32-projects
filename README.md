@@ -1,6 +1,6 @@
-## Bird Call Identifier with Federated Learning
+## Bird Call Identifier on ESP32
 
-This project involves building a tiny bird call identifiers on multiple micro-controllers and doing federated learning using an arbitration device. 
+This project involves building a tiny bird call identifiers on multiple micro-controllers. 
 
 # Dataset
 The [BirdClef 2023](https://www.kaggle.com/competitions/birdclef-2023) data was used to train the models.
@@ -28,7 +28,5 @@ After training, the model
 
 # Hardware
 The following hardware were used in the project
-- 1x Arduino Nano BLE Sense Rev2 Board
 - 2x ESP32S3 Board
-- 1x Orange Pi Zero 3 as an Arbitrator
 - A PC with GPU for weight updates
