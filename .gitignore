@@ -7,3 +7,13 @@
 *.pte
 *.pth
 *.h5
+spectrogram_dataset
+output_wav
+spec_dir_color
+test_soundscapes
+birds
+*.csv
+*.png
+*.txt
+*.tflite
+

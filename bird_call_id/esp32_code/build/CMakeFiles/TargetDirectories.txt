@@ -1,3 +1,0 @@
-/mnt/Stuff/phd_projects/esp32-projects/bird_call_id/esp32_code/build/CMakeFiles/bird_call.dir
-/mnt/Stuff/phd_projects/esp32-projects/bird_call_id/esp32_code/build/CMakeFiles/edit_cache.dir
-/mnt/Stuff/phd_projects/esp32-projects/bird_call_id/esp32_code/build/CMakeFiles/rebuild_cache.dir
