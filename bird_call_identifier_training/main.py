@@ -1,43 +1,58 @@
 from arbiter import *
 from expert import *
 from train import *
+from data import *
+import os
+from tensorflow.keras import mixed_precision
 
 def main():
     """Main training pipeline"""
+    arbiter = build_feature_extractor_arbiter_with_value(
+                    mfcc_timesteps=MFCC_TIMESTEPS,
+                    mfcc_features=MFCC_FEATURES,
+                    latent_dim=LATENT_CHANNEL,
+                    num_experts=NUM_EXPERTS
+                )
     
-    arbiter = build_feature_extractor_arbiter_with_value(96, LATENT_CHANNEL, LATENT_FILTER, NUM_EXPERTS)
-    experts = {
-        i: build_expert_model(LATENT_DIM) 
-        for i in range(NUM_EXPERTS)
-    }
-    
+    expert_data_base_path = '/mnt/Stuff/phd_projects/esp32-projects/bird_call_id/birds/'
+    rl_data_path = '/mnt/Stuff/phd_projects/esp32-projects/bird_call_id/rl_data/'
+
+    experts = [
+        build_expert_model(LATENT_DIM) for i in range(NUM_EXPERTS)
+    ]
+
+    print(os.listdir(expert_data_base_path))
+    expert_data = []
+
+    for i in os.listdir(expert_data_base_path):
+        path = f'{expert_data_base_path}/{i}'
+        expert_data.append(create_bird_dataset(path))
+   
     print("=== Bird Call Detection System for MCU ===")
     print(f"Total Classes: {NUM_CLASSES}")
     print(f"Number of Experts: {NUM_EXPERTS}")
     print(f"Classes per Expert: {10}")
     print(f"Latent Dimension: {LATENT_DIM}")
-    
-    # Load your data here
-    # train_data = load_bird_call_data(...)
-    # val_data = load_bird_call_data(...)
-    
-    # For demonstration, create dummy data
-    print("\n[Note: Using dummy data for demonstration]")
-    train_data = tf.data.Dataset.from_tensor_slices((
-        np.random.randn(1000, *IMAGE_SIZE).astype(np.float32),
-        np.random.randint(0, NUM_CLASSES, 1000)
-    )).batch(32)
-    
-    val_data = tf.data.Dataset.from_tensor_slices((
-        np.random.randn(200, *IMAGE_SIZE).astype(np.float32),
-        np.random.randint(0, NUM_CLASSES, 200)
-    )).batch(32)
-    
-    # Step 1: Train expert models
+
+    gpus = tf.config.experimental.list_physical_devices('GPU')
+    if gpus:
+        try:
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
+        except RuntimeError as e:
+            print(e)
+
+    policy = mixed_precision.Policy('mixed_float16')
+    mixed_precision.set_global_policy(policy)
+
+    for expert, expert_data in zip(experts, expert_data):
+        train_expert_supervised(arbiter, expert, expert_data[0], expert_data[1])
     # train_experts_supervised(system, train_data, val_data, epochs=10)
+
+    rl_data = create_bird_dataset(rl_data_path)
     
     # Step 2: Train arbiter with RL
-    train_arbiter_rl(arbiter, experts, train_data, episodes=200)
+    train_arbiter_rl(arbiter, experts, rl_data[0])
     
     # Step 3: Knowledge distillation for compression
     # (You would create smaller student models and distill each component)

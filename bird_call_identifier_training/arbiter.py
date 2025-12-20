@@ -1,18 +1,20 @@
 import tensorflow as tf
 from tensorflow import keras
 
-def build_feature_extractor_arbiter_with_value(img_size, latent_dim, latent_filters, num_experts):
+def build_feature_extractor_arbiter_with_value(mfcc_timesteps, mfcc_features, latent_dim, num_experts):
     num_actions = num_experts + 1
+    inputs = keras.layers.Input(shape=(mfcc_timesteps, mfcc_features))
     
-    inputs = keras.layers.Input(shape=(img_size, img_size, 3))
+    x = keras.layers.Reshape((mfcc_timesteps, mfcc_features, 1))(inputs)
     
-    x = keras.layers.Conv2D(32, (3, 3), strides=(2, 2), padding='same')(inputs)
+    x = keras.layers.Conv2D(32, (3, 3), strides=(2, 2), padding='same')(x)
     x = keras.layers.BatchNormalization()(x)
     x = keras.layers.Activation('swish')(x)
     
     x = keras.layers.DepthwiseConv2D((3, 3), padding='same')(x)
     x = keras.layers.BatchNormalization()(x)
     x = keras.layers.Activation('swish')(x)
+    
     x = keras.layers.Conv2D(16, (1, 1), padding='same')(x)
     x = keras.layers.BatchNormalization()(x)
     x = keras.layers.Activation('swish')(x)
@@ -20,6 +22,7 @@ def build_feature_extractor_arbiter_with_value(img_size, latent_dim, latent_filt
     x = keras.layers.DepthwiseConv2D((3, 3), strides=(2, 2), padding='same')(x)
     x = keras.layers.BatchNormalization()(x)
     x = keras.layers.Activation('swish')(x)
+    
     x = keras.layers.Conv2D(24, (1, 1), padding='same')(x)
     x = keras.layers.BatchNormalization()(x)
     x = keras.layers.Activation('swish')(x)
@@ -27,6 +30,7 @@ def build_feature_extractor_arbiter_with_value(img_size, latent_dim, latent_filt
     x = keras.layers.DepthwiseConv2D((3, 3), strides=(2, 2), padding='same')(x)
     x = keras.layers.BatchNormalization()(x)
     x = keras.layers.Activation('swish')(x)
+    
     x = keras.layers.Conv2D(40, (1, 1), padding='same')(x)
     x = keras.layers.BatchNormalization()(x)
     x = keras.layers.Activation('swish')(x)
@@ -34,12 +38,11 @@ def build_feature_extractor_arbiter_with_value(img_size, latent_dim, latent_filt
     x = keras.layers.DepthwiseConv2D((3, 3), strides=(2, 2), padding='same')(x)
     x = keras.layers.BatchNormalization()(x)
     x = keras.layers.Activation('swish')(x)
+    
     x = keras.layers.Conv2D(latent_dim, (1, 1), padding='same')(x)
     x = keras.layers.BatchNormalization()(x)
     latent_features = keras.layers.Activation('swish')(x)
-
-    print(latent_features.shape)
-    
+        
     pooled = keras.layers.GlobalAveragePooling2D()(x)
     
     policy = keras.layers.Dense(64, activation='relu')(pooled)
@@ -53,11 +56,9 @@ def build_feature_extractor_arbiter_with_value(img_size, latent_dim, latent_filt
         outputs=[latent_features, policy_logits, value_output],
         name='arbiter_feature_extractor_ac'
     )
-    
     return model
 
 def sample_action(policy_logits, temperature=1.0):
     policy_logits = policy_logits / temperature
     action = tf.random.categorical(policy_logits, 1)
-    
     return action
