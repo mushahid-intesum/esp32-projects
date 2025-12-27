@@ -31,7 +31,7 @@ def process_file(file_path, label, n_mfcc=MFCC_FEATURES, sr=22050, max_len=MFCC_
     
     return mfcc, label
 
-def create_bird_dataset(base_path, n_mfcc=MFCC_FEATURES, sr=22050, max_len=MFCC_TIMESTEPS, batch_size=32, shuffle=True, validation_split=0.2):
+def create_bird_dataset(base_path, n_mfcc=MFCC_FEATURES, sr=22050, max_len=MFCC_TIMESTEPS, batch_size=8, shuffle=True, validation_split=0.2):
     file_paths = []
     labels = []
     class_names = []
@@ -68,18 +68,18 @@ def create_bird_dataset(base_path, n_mfcc=MFCC_FEATURES, sr=22050, max_len=MFCC_
     
     train_dataset = train_dataset.map(
         lambda x, y: process_file(x, y, n_mfcc, sr, max_len),
-        num_parallel_calls=tf.data.AUTOTUNE
+        num_parallel_calls=1
     )
     
     val_dataset = val_dataset.map(
         lambda x, y: process_file(x, y, n_mfcc, sr, max_len),
-        num_parallel_calls=tf.data.AUTOTUNE
+        num_parallel_calls=1
     )
     
     train_dataset = train_dataset.batch(batch_size)
-    train_dataset = train_dataset.prefetch(tf.data.AUTOTUNE)
+    train_dataset = train_dataset.prefetch(1)
     
     val_dataset = val_dataset.batch(batch_size)
-    val_dataset = val_dataset.prefetch(tf.data.AUTOTUNE)
+    val_dataset = val_dataset.prefetch(1)
     
     return (train_dataset, val_dataset, class_names, total_samples)

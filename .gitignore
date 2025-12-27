@@ -9,8 +9,6 @@
 *.h5
 __pycache__
 *.txt
-spectrogram_dataset
-test_soundscapes
-spec_dir_color
-birds
-rl_data
+expert_data
+arbiter_data
+wandb

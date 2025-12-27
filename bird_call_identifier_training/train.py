@@ -22,22 +22,14 @@ wandb.init(
     }
 )
 
-EXPERT_LABELS = {
-    0: list(range(0, 10)),
-    1: list(range(10, 20)),
-    2: list(range(20, 30)),
-    3: list(range(30, 40)),
-    4: list(range(40, 50))
-}
-
-def get_expert_for_label( label):
-    for expert_id, labels in EXPERT_LABELS.items():
+def get_expert_for_label(label, expert_labels):
+    for expert_id, labels in expert_labels.items():
         if label in labels:
             return expert_id
     return None
     
-def label_to_expert_label(label, expert_id):
-    expert_labels = EXPERT_LABELS[expert_id]
+def label_to_expert_label(label, expert_id, expert_labels):
+    expert_labels = expert_labels[expert_id]
     return expert_labels.index(label)
 
 def compute_discounted_returns(rewards, gamma=0.99):
@@ -53,8 +45,10 @@ def compute_discounted_returns(rewards, gamma=0.99):
 def train_arbiter_rl(arbiter,
                     experts,
                     train_data,
+                    expert_labels,
                     episodes=1000,
-                    algorithm='PPO'):
+                    algorithm='PPO',
+                    trajectory_length=128):  # Larger batches for GPU efficiency
     print(f"\nTraining Arbiter with {algorithm}...")
     
     optimizer = keras.optimizers.Adam(learning_rate=0.0003)
@@ -70,49 +64,55 @@ def train_arbiter_rl(arbiter,
     entropy_coef = 0.01
     value_coef = 0.5
     ppo_epochs = 4
-       
     
     for episode in range(episodes):
-        episode_rewards = []
-        episode_actions = []
-        episode_logits = []
-        episode_values = []
-        episode_latents = []
-        episode_old_probs = []
-        episode_inputs = []
+        episode_total_reward = 0
+        episode_batches = 0
+        
+        # Keep everything on GPU - use lists of tensors
+        trajectory_rewards = []
+        trajectory_actions = []
+        trajectory_old_probs = []
+        trajectory_inputs = []
+        trajectory_labels = []
+        
+        batch_count = 0
         
         # === EXPERIENCE COLLECTION ===
         for x_batch, y_batch in train_data:
             batch_size = tf.shape(x_batch)[0]
+            
+            # Forward pass (keep on GPU)
             latent, policy_logits, values = arbiter(x_batch, training=False)
             
             actions = sample_action(policy_logits)
             actions = tf.squeeze(actions, axis=1)
             
-            # Store old action probabilities for PPO
+            # Store old action probabilities
             action_probs = tf.nn.softmax(policy_logits)
             action_masks = tf.one_hot(actions, NUM_ACTIONS)
             old_probs = tf.reduce_sum(action_probs * action_masks, axis=1)
-            episode_old_probs.append(old_probs)
             
-            # Calculate rewards
-            rewards = []
+            # Calculate rewards (CPU loop but minimal)
+            rewards_list = []
+            actions_np = actions.numpy()
+            y_batch_np = y_batch.numpy()
+            latent_np = latent.numpy()
             
             for i in range(batch_size):
-                action = actions[i].numpy()
-                true_label = y_batch[i].numpy()
+                action = actions_np[i]
+                true_label = y_batch_np[i]
                 
                 if action == 0:
                     reward = NO_DETECTION_REWARD
                 else:
                     expert_id = action - 1
-                    correct_expert = get_expert_for_label(true_label)
+                    correct_expert = get_expert_for_label(true_label, expert_labels)
                     
                     if expert_id == correct_expert:
-                        expert_latent = tf.expand_dims(latent[i], 0)
-
+                        expert_latent = tf.expand_dims(latent[i:i+1], 0)
                         pred = experts[expert_id](expert_latent, training=False)
-                        expert_label = label_to_expert_label(true_label, expert_id)
+                        expert_label = label_to_expert_label(true_label, expert_id, expert_labels)
                         
                         if tf.argmax(pred[0]).numpy() == expert_label:
                             reward = CORRECT_REWARD + EFFICIENCY_BONUS
@@ -121,114 +121,154 @@ def train_arbiter_rl(arbiter,
                     else:
                         reward = INCORRECT_PENALTY
                 
-                rewards.append(reward)
+                rewards_list.append(reward)
+            
+            rewards = tf.constant(rewards_list, dtype=tf.float32)
+            
+            # Store trajectory data (KEEP ON GPU - just store references)
+            trajectory_rewards.append(rewards)
+            trajectory_actions.append(actions)
+            trajectory_old_probs.append(old_probs)
+            trajectory_inputs.append(x_batch)
+            trajectory_labels.append(y_batch)
+            
+            episode_total_reward += tf.reduce_sum(rewards).numpy()
+            episode_batches += 1
+            batch_count += 1
+            
+            # Don't delete tensors yet - we need them
+            
+            # === PERFORM PPO UPDATE EVERY trajectory_length BATCHES ===
+            if batch_count >= trajectory_length:
+                if algorithm == 'PPO':
+                    # Concatenate all trajectory batches into single tensors (more efficient)
+                    all_rewards = tf.concat(trajectory_rewards, axis=0)
+                    all_actions = tf.concat(trajectory_actions, axis=0)
+                    all_old_probs = tf.concat(trajectory_old_probs, axis=0)
+                    all_inputs = tf.concat(trajectory_inputs, axis=0)
+                    
+                    # Compute returns once (outside PPO epochs)
+                    all_returns = compute_discounted_returns(all_rewards, gamma=0.99)
+                    
+                    # Create a tf.data.Dataset for efficient batching during PPO epochs
+                    update_dataset = tf.data.Dataset.from_tensor_slices({
+                        'inputs': all_inputs,
+                        'actions': all_actions,
+                        'old_probs': all_old_probs,
+                        'returns': all_returns
+                    })
+                    update_dataset = update_dataset.shuffle(buffer_size=len(all_rewards))
+                    update_dataset = update_dataset.batch(64)  # Mini-batch for updates
+                    
+                    for ppo_epoch in range(ppo_epochs):
+                        epoch_policy_loss = 0
+                        epoch_value_loss = 0
+                        epoch_entropy = 0
+                        n_batches = 0
+                        
+                        for mini_batch in update_dataset:
+                            with tf.GradientTape() as tape:
+                                # Forward pass
+                                _, new_policy, new_values = arbiter(mini_batch['inputs'], training=True)
+                                new_probs_all = tf.nn.softmax(new_policy)
+                                
+                                # Compute advantages
+                                advantages = mini_batch['returns'] - tf.squeeze(new_values)
+                                advantages = (advantages - tf.reduce_mean(advantages)) / (tf.math.reduce_std(advantages) + 1e-8)
+                                
+                                # PPO clipped objective
+                                action_masks = tf.one_hot(mini_batch['actions'], NUM_ACTIONS)
+                                new_probs = tf.reduce_sum(new_probs_all * action_masks, axis=1)
+                                
+                                ratio = new_probs / (mini_batch['old_probs'] + 1e-10)
+                                surr1 = ratio * advantages
+                                surr2 = tf.clip_by_value(ratio, 1 - epsilon_clip, 1 + epsilon_clip) * advantages
+                                policy_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
+                                
+                                # Value loss
+                                value_loss = tf.reduce_mean(tf.square(mini_batch['returns'] - tf.squeeze(new_values)))
+                                
+                                # Entropy bonus
+                                entropy = -tf.reduce_mean(
+                                    tf.reduce_sum(new_probs_all * tf.math.log(new_probs_all + 1e-10), axis=1)
+                                )
+                                
+                                total_loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
+                            
+                            # Apply gradients
+                            grads = tape.gradient(total_loss, arbiter.trainable_variables)
+                            grads, _ = tf.clip_by_global_norm(grads, 0.5)
+                            optimizer.apply_gradients(zip(grads, arbiter.trainable_variables))
+                            
+                            epoch_policy_loss += policy_loss
+                            epoch_value_loss += value_loss
+                            epoch_entropy += entropy
+                            n_batches += 1
+                        
+                        # Log after each PPO epoch
+                        if ppo_epoch == ppo_epochs - 1:
+                            avg_reward = episode_total_reward / episode_batches
+                            print(f"Episode {episode}, Batch {episode_batches}: Avg Reward={avg_reward:.4f}, "
+                                  f"Loss={total_loss.numpy():.4f}")
+                            
+                            wandb.log({
+                                "episode": episode,
+                                "batch": episode_batches,
+                                "avg_reward": avg_reward,
+                                "policy_loss": (epoch_policy_loss / n_batches).numpy(),
+                                "value_loss": (epoch_value_loss / n_batches).numpy(),
+                                "entropy": (epoch_entropy / n_batches).numpy(),
+                                "total_loss": total_loss.numpy()
+                            })
+                    
+                    # Clear trajectory after update
+                    del all_rewards, all_actions, all_old_probs, all_inputs, all_returns, update_dataset
                 
-         
-            episode_rewards.append(rewards)
-            episode_actions.append(actions)
-            episode_logits.append(policy_logits)
-            episode_values.append(values)
-            episode_latents.append(latent)
-            episode_inputs.append(x_batch)
+                else:  # REINFORCE
+                    # Concatenate trajectory
+                    all_rewards = tf.concat(trajectory_rewards, axis=0)
+                    all_actions = tf.concat(trajectory_actions, axis=0)
+                    all_inputs = tf.concat(trajectory_inputs, axis=0)
+                    
+                    with tf.GradientTape() as tape:
+                        _, logits, values = arbiter(all_inputs, training=True)
+                        
+                        advantages = all_rewards - tf.squeeze(values)
+                        
+                        # Policy loss
+                        action_probs = tf.nn.softmax(logits)
+                        action_masks = tf.one_hot(all_actions, NUM_ACTIONS)
+                        selected_probs = tf.reduce_sum(action_probs * action_masks, axis=1)
+                        log_probs = tf.math.log(selected_probs + 1e-10)
+                        policy_loss = -tf.reduce_mean(log_probs * tf.stop_gradient(advantages))
+                        
+                        # Value loss
+                        value_loss = tf.reduce_mean(tf.square(all_rewards - tf.squeeze(values)))
+                        
+                        total_loss = policy_loss + 0.5 * value_loss
+                    
+                    grads = tape.gradient(total_loss, arbiter.trainable_variables)
+                    optimizer.apply_gradients(zip(grads, arbiter.trainable_variables))
+                    
+                    del all_rewards, all_actions, all_inputs
+                
+                # Clear trajectory buffers
+                trajectory_rewards = []
+                trajectory_actions = []
+                trajectory_old_probs = []
+                trajectory_inputs = []
+                trajectory_labels = []
+                batch_count = 0
+                
+                # Only clear session periodically, not every update
+                if episode_batches % 10 == 0:
+                    tf.keras.backend.clear_session()
         
-        if algorithm == 'PPO':
-            for ppo_epoch in range(ppo_epochs):
-                with tf.GradientTape() as tape:
-                    total_policy_loss = 0
-                    total_value_loss = 0
-                    total_entropy = 0
-                    
-                    for batch_idx in range(len(episode_rewards)):
-                        rewards = tf.constant(episode_rewards[batch_idx], dtype=tf.float32)
-                        actions = episode_actions[batch_idx]
-                        latent = episode_latents[batch_idx]
-                        old_probs = episode_old_probs[batch_idx]
-                        input = episode_inputs[batch_idx]
-
-                        new_latents, new_policy, new_values = arbiter(input)
-                        new_probs_all = tf.nn.softmax(new_policy)
-                        
-                        returns = compute_discounted_returns(rewards, gamma=0.99)
-                        
-                        advantages = returns - tf.squeeze(new_values)
-                        advantages = (advantages - tf.reduce_mean(advantages)) / (tf.math.reduce_std(advantages) + 1e-8)
-                        
-                        action_masks = tf.one_hot(actions, NUM_ACTIONS)
-                        new_probs = tf.reduce_sum(new_probs_all * action_masks, axis=1)
-                        
-                        ratio = new_probs / (old_probs + 1e-10)
-                        surr1 = ratio * advantages
-                        surr2 = tf.clip_by_value(ratio, 1 - epsilon_clip, 1 + epsilon_clip) * advantages
-                        policy_loss = -tf.reduce_mean(tf.minimum(surr1, surr2))
-                        
-                        value_loss = tf.reduce_mean(tf.square(returns - tf.squeeze(new_values)))
-                        
-                        entropy = -tf.reduce_mean(
-                            tf.reduce_sum(new_probs_all * tf.math.log(new_probs_all + 1e-10), axis=1)
-                        )
-                        
-                        total_policy_loss += policy_loss
-                        total_value_loss += value_loss
-                        total_entropy += entropy
-                    
-                    total_loss = total_policy_loss + value_coef * total_value_loss - entropy_coef * total_entropy
-                
-                grads = tape.gradient(total_loss, arbiter.trainable_variables)
-                grads, _ = tf.clip_by_global_norm(grads, 0.5)  # Gradient clipping
-                optimizer.apply_gradients(zip(grads, arbiter.trainable_variables))
+        # Episode summary
+        if episode % 10 == 0:
+            avg_episode_reward = episode_total_reward / episode_batches
+            print(f"\n=== Episode {episode} Complete: Avg Reward={avg_episode_reward:.4f} ===\n")
             
-                avg_reward = np.mean([r for batch in episode_rewards for r in batch])
-                print(f"Episode {episode}: Avg Reward={avg_reward:.4f}, "
-                        f"Loss={total_loss.numpy():.4f}")
-                
-                wandb.log({
-                    "episode": episode,
-                    "episode_rewards": avg_reward,
-                    "policy_loss": total_policy_loss.numpy(),
-                    "value_loss": total_value_loss.numpy(),
-                    "entropy": total_entropy.numpy(),
-                    "total_loss": total_loss.numpy()
-                })
-        
-       
-        else:  # REINFORCE (default)
-            # REINFORCE: Basic policy gradient with baseline
-            with tf.GradientTape() as tape:
-                total_policy_loss = 0
-                total_value_loss = 0
-                
-                for batch_idx in range(len(episode_rewards)):
-                    rewards = tf.constant(episode_rewards[batch_idx], dtype=tf.float32)
-                    actions = episode_actions[batch_idx]
-                    logits = episode_logits[batch_idx]
-                    values = episode_values[batch_idx]
-                    
-                    returns = rewards
-                    advantages = returns - tf.squeeze(values)
-                    
-                    # Policy loss
-                    action_probs = tf.nn.softmax(logits)
-                    action_masks = tf.one_hot(actions, NUM_ACTIONS)
-                    selected_probs = tf.reduce_sum(action_probs * action_masks, axis=1)
-                    log_probs = tf.math.log(selected_probs + 1e-10)
-                    policy_loss = -tf.reduce_mean(log_probs * tf.stop_gradient(advantages))
-                    
-                    # Value loss
-                    value_loss = tf.reduce_mean(tf.square(returns - tf.squeeze(values)))
-                    
-                    total_policy_loss += policy_loss
-                    total_value_loss += value_loss
-                
-                total_loss = total_policy_loss + 0.5 * total_value_loss
-            
-            grads = tape.gradient(total_loss, arbiter.trainable_variables)
-            optimizer.apply_gradients(zip(grads, arbiter.trainable_variables))
-            
-            if episode % 50 == 0:
-                avg_reward = np.mean([r for batch in episode_rewards for r in batch])
-                print(f"Episode {episode}: Avg Reward={avg_reward:.4f}, "
-                      f"Loss={total_loss.numpy():.4f}")
-                
 def train_expert_supervised(arbiter, expert, train_data, val_data, epochs=50):
     """Train expert models with supervised learning"""    
     print(f"\nTraining Expert")
@@ -307,46 +347,94 @@ def train_expert_supervised(arbiter, expert, train_data, val_data, epochs=50):
               f"Val Loss={np.mean(val_loss):.4f}, "
               f"Val Acc={np.mean(val_acc):.4f}")          
 
-def distill_model(student_model, teacher_model, train_data, 
-                  temperature=10.0, alpha=0.5, epochs=30):
-    """Knowledge distillation for model compression"""
-    print("\nPerforming Knowledge Distillation...")
+
+def train_arbiter_distillation_with_features(student_arbiter,
+                                             teacher_arbiter,
+                                             train_data,
+                                             epochs=2,
+                                             temperature=5.0,
+                                             alpha=0.7,
+                                             beta=0.3,
+                                             learning_rate=0.0001):
     
-    optimizer = keras.optimizers.Adam(learning_rate=0.0005)
+    print(f"\nTraining Student Arbiter with Feature Distillation...")
+    print(f"Temperature: {temperature}, Alpha: {alpha}, Beta (feature): {beta}")
+    
+    optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
     
     for epoch in range(epochs):
-        epoch_loss = []
+        epoch_distill_loss = 0
+        epoch_hard_loss = 0
+        epoch_feature_loss = 0
+        epoch_total_loss = 0
+        epoch_policy_acc = 0
+        n_batches = 0
         
-        for x_batch, y_batch in train_data:
+        for x_batch, y_batch in train_data:            
+            with tf.device('/GPU:0'):
+                teacher_latent, teacher_policy_logits, teacher_values = teacher_arbiter(
+                    x_batch, training=False
+                )
+                teacher_probs_soft = tf.nn.softmax(teacher_policy_logits / temperature)
+                teacher_probs_hard = tf.nn.softmax(teacher_policy_logits)
+            
             with tf.GradientTape() as tape:
-                # Teacher predictions (soft targets)
-                teacher_logits = teacher_model(x_batch, training=False)
-                teacher_probs = tf.nn.softmax(teacher_logits / temperature)
-                
-                # Student predictions
-                student_logits = student_model(x_batch, training=True)
-                student_probs = tf.nn.softmax(student_logits / temperature)
-                
-                # Distillation loss
-                distill_loss = tf.reduce_mean(
-                    keras.losses.categorical_crossentropy(
-                        teacher_probs, student_probs
-                    )
-                ) * (temperature ** 2)
-                
-                # Hard target loss
-                hard_loss = tf.reduce_mean(
-                    keras.losses.sparse_categorical_crossentropy(
-                        y_batch, student_logits, from_logits=True
-                    )
+                student_latent, student_policy_logits, student_values = student_arbiter(
+                    x_batch, training=True
                 )
                 
-                # Combined loss
-                loss = alpha * distill_loss + (1 - alpha) * hard_loss
+                student_probs_soft = tf.nn.softmax(student_policy_logits / temperature)
+                student_probs_hard = tf.nn.softmax(student_policy_logits)
+                
+                distill_loss = -tf.reduce_mean(
+                    tf.reduce_sum(teacher_probs_soft * tf.math.log(student_probs_soft + 1e-10), axis=1)
+                ) * (temperature ** 2)
+                
+                hard_loss = -tf.reduce_mean(
+                    tf.reduce_sum(teacher_probs_hard * tf.math.log(student_probs_hard + 1e-10), axis=1)
+                )
+                
+                value_loss = tf.reduce_mean(tf.square(teacher_values - student_values))
+                
+                # feature_loss = tf.reduce_mean(tf.square(teacher_latent - student_latent))
+                
+                total_loss = (alpha * distill_loss + 
+                             (1 - alpha) * hard_loss + 
+                             0.5 * value_loss )
             
-            grads = tape.gradient(loss, student_model.trainable_variables)
-            optimizer.apply_gradients(zip(grads, student_model.trainable_variables))
-            epoch_loss.append(loss.numpy())
+            grads = tape.gradient(total_loss, student_arbiter.trainable_variables)
+            grads, _ = tf.clip_by_global_norm(grads, 1.0)
+            optimizer.apply_gradients(zip(grads, student_arbiter.trainable_variables))
+            
+            student_actions = tf.argmax(student_probs_hard, axis=1)
+            teacher_actions = tf.argmax(teacher_probs_hard, axis=1)
+            policy_accuracy = tf.reduce_mean(
+                tf.cast(tf.equal(student_actions, teacher_actions), tf.float32)
+            )
+            
+            epoch_distill_loss += distill_loss.numpy()
+            epoch_hard_loss += hard_loss.numpy()
+            # epoch_feature_loss += feature_loss.numpy()
+            epoch_total_loss += total_loss.numpy()
+            epoch_policy_acc += policy_accuracy.numpy()
+            n_batches += 1
         
-        if epoch % 5 == 0:
-            print(f"Distillation Epoch {epoch}: Loss={np.mean(epoch_loss):.4f}")
+        if epoch % 1 == 0:
+            print(f"\nEpoch {epoch}/{epochs}:")
+            print(f"  Distill Loss: {epoch_distill_loss/n_batches:.4f}")
+            print(f"  Hard Loss: {epoch_hard_loss/n_batches:.4f}")
+            # print(f"  Feature Loss: {epoch_feature_loss/n_batches:.4f}")
+            print(f"  Total Loss: {epoch_total_loss/n_batches:.4f}")
+            print(f"  Policy Accuracy: {epoch_policy_acc/n_batches:.4f}")
+            
+            wandb.log({
+                "distill_epoch": epoch,
+                "distill_loss": epoch_distill_loss/n_batches,
+                "hard_loss": epoch_hard_loss/n_batches,
+                # "feature_loss": epoch_feature_loss/n_batches,
+                "total_loss": epoch_total_loss/n_batches,
+                "policy_accuracy": epoch_policy_acc/n_batches
+            })
+    
+    print("\n=== Feature Distillation Complete ===")
+    return student_arbiter

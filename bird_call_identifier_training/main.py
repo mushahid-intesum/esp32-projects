@@ -6,34 +6,6 @@ import os
 from tensorflow.keras import mixed_precision
 
 def main():
-    """Main training pipeline"""
-    arbiter = build_feature_extractor_arbiter_with_value(
-                    mfcc_timesteps=MFCC_TIMESTEPS,
-                    mfcc_features=MFCC_FEATURES,
-                    latent_dim=LATENT_CHANNEL,
-                    num_experts=NUM_EXPERTS
-                )
-    
-    expert_data_base_path = '/mnt/Stuff/phd_projects/esp32-projects/bird_call_id/birds/'
-    rl_data_path = '/mnt/Stuff/phd_projects/esp32-projects/bird_call_id/rl_data/'
-
-    experts = [
-        build_expert_model(LATENT_DIM) for i in range(NUM_EXPERTS)
-    ]
-
-    print(os.listdir(expert_data_base_path))
-    expert_data = []
-
-    for i in os.listdir(expert_data_base_path):
-        path = f'{expert_data_base_path}/{i}'
-        expert_data.append(create_bird_dataset(path))
-   
-    print("=== Bird Call Detection System for MCU ===")
-    print(f"Total Classes: {NUM_CLASSES}")
-    print(f"Number of Experts: {NUM_EXPERTS}")
-    print(f"Classes per Expert: {10}")
-    print(f"Latent Dimension: {LATENT_DIM}")
-
     gpus = tf.config.experimental.list_physical_devices('GPU')
     if gpus:
         try:
@@ -44,20 +16,70 @@ def main():
 
     policy = mixed_precision.Policy('mixed_float16')
     mixed_precision.set_global_policy(policy)
+    
+    arbiter = build_feature_extractor_arbiter_with_value(
+                    mfcc_timesteps=MFCC_TIMESTEPS,
+                    mfcc_features=MFCC_FEATURES,
+                    latent_dim=LATENT_CHANNEL,
+                    num_experts=NUM_EXPERTS
+                )
+    
+    expert_data_base_path = '/mnt/Stuff/phd_projects/esp32-projects/bird_call_identifier_training/expert_data/'
+    rl_data_path = '/mnt/Stuff/phd_projects/esp32-projects/bird_call_identifier_training/arbiter_data/'
 
-    for expert, expert_data in zip(experts, expert_data):
-        train_expert_supervised(arbiter, expert, expert_data[0], expert_data[1])
-    # train_experts_supervised(system, train_data, val_data, epochs=10)
+    experts = []
+    expert_data = []
+    expert_labels = {}
+
+    """Expert Training"""
+    for i, folder_name in enumerate(os.listdir(expert_data_base_path)):
+        path = f'{expert_data_base_path}/{folder_name}'
+        expert_data.append(create_bird_dataset(path))
+        experts.append(build_expert_model(LATENT_DIM, len(os.listdir(path))))
+        expert_labels[i] = os.listdir(path)
+
+    # for expert, expert_data in zip(experts, expert_data):
+    #     train_expert_supervised(arbiter, expert, expert_data[0], expert_data[1], epochs=100)
+    
+    # for i, expert in enumerate(experts):
+    #     expert.save_weights(f'./expert_{i}.weights.h5')
+
+
+    """Arbiter Training"""
+    # for i, folder_name in enumerate(os.listdir(expert_data_base_path)):
+    #     path = f'{expert_data_base_path}/{folder_name}'
+    #     expert = build_expert_model(LATENT_DIM, len(os.listdir(path)))
+    #     expert.load_weights(f'./expert_{i}.weights.h5')
+    #     experts.append(expert)
+    #     expert_labels[i] = os.listdir(path)
 
     rl_data = create_bird_dataset(rl_data_path)
     
-    # Step 2: Train arbiter with RL
-    train_arbiter_rl(arbiter, experts, rl_data[0])
-    
+    # train_arbiter_rl(arbiter, experts, rl_data[0], expert_labels, episodes=1)
+
+
     # Step 3: Knowledge distillation for compression
     # (You would create smaller student models and distill each component)
     # print("\n[Distillation step - create student models as needed]")
+
+    student_arbiter = build_feature_extractor_student_arbiter_with_value(
+                    mfcc_timesteps=MFCC_TIMESTEPS,
+                    mfcc_features=MFCC_FEATURES,
+                    latent_dim=LATENT_CHANNEL,
+                    num_experts=NUM_EXPERTS
+                )
+
+    student_experts = []
+    for i, folder_name in enumerate(os.listdir(expert_data_base_path)):
+        path = f'{expert_data_base_path}/{folder_name}'
+        expert_data.append(create_bird_dataset(path))
+        student_experts.append(build_student_expert_model(LATENT_DIM, len(os.listdir(path))))
     
+    train_arbiter_distillation_with_features(student_arbiter, arbiter, rl_data[0])
+
+    # for i in range(len(experts)):
+    #     train_arbiter_distillation_with_features(student_experts[i], experts[i], expert_data[i][0])
+
     # Step 4: Convert to TFLite
     # print("\n=== Converting Models to TFLite ===")
     
