@@ -32,50 +32,54 @@ def main():
     expert_labels = {}
 
     """Expert Training"""
-    for i, folder_name in enumerate(os.listdir(expert_data_base_path)):
-        path = f'{expert_data_base_path}/{folder_name}'
-        expert_data.append(create_bird_dataset(path))
-        experts.append(build_expert_model(LATENT_DIM, len(os.listdir(path))))
-        expert_labels[i] = os.listdir(path)
-
+    # for i, folder_name in enumerate(os.listdir(expert_data_base_path)):
+    #     path = f'{expert_data_base_path}/{folder_name}'
+    #     expert_data.append(create_bird_dataset(path))
+    #     experts.append(build_expert_model(LATENT_DIM, len(os.listdir(path))))
+    #     expert_labels[i] = os.listdir(path)
+    
+    # expert_id = 0
     # for expert, expert_data in zip(experts, expert_data):
-    #     train_expert_supervised(arbiter, expert, expert_data[0], expert_data[1], epochs=100)
+    #     train_expert_supervised(arbiter, expert, expert_id, expert_data[0], expert_data[1], epochs=100)
+    #     expert_id += 1
     
     # for i, expert in enumerate(experts):
     #     expert.save_weights(f'./expert_{i}.weights.h5')
 
-
     """Arbiter Training"""
-    # for i, folder_name in enumerate(os.listdir(expert_data_base_path)):
-    #     path = f'{expert_data_base_path}/{folder_name}'
-    #     expert = build_expert_model(LATENT_DIM, len(os.listdir(path)))
-    #     expert.load_weights(f'./expert_{i}.weights.h5')
-    #     experts.append(expert)
-    #     expert_labels[i] = os.listdir(path)
+    for i, folder_name in enumerate(os.listdir(expert_data_base_path)):
+        path = f'{expert_data_base_path}/{folder_name}'
+        expert = build_expert_model(LATENT_DIM, len(os.listdir(path)))
+        expert.load_weights(f'./expert_{i}.weights.h5')
+        experts.append(expert)
+        expert_labels[i] = os.listdir(path)
 
     rl_data = create_bird_dataset(rl_data_path)
+
+    # if os.path.exists('./arbiter.weights.h5'):
+    #     arbiter.load_weights('./arbiter.weights.h5')
     
-    # train_arbiter_rl(arbiter, experts, rl_data[0], expert_labels, episodes=1)
+    train_arbiter_rl(arbiter, experts, rl_data[0], expert_labels, episodes=50)
 
-
+    arbiter.save_weights(f'./arbiter.weights.h5')
     # Step 3: Knowledge distillation for compression
     # (You would create smaller student models and distill each component)
     # print("\n[Distillation step - create student models as needed]")
 
-    student_arbiter = build_feature_extractor_student_arbiter_with_value(
-                    mfcc_timesteps=MFCC_TIMESTEPS,
-                    mfcc_features=MFCC_FEATURES,
-                    latent_dim=LATENT_CHANNEL,
-                    num_experts=NUM_EXPERTS
-                )
+    # student_arbiter = build_feature_extractor_student_arbiter_with_value(
+    #                 mfcc_timesteps=MFCC_TIMESTEPS,
+    #                 mfcc_features=MFCC_FEATURES,
+    #                 latent_dim=LATENT_CHANNEL,
+    #                 num_experts=NUM_EXPERTS
+    #             )
 
-    student_experts = []
-    for i, folder_name in enumerate(os.listdir(expert_data_base_path)):
-        path = f'{expert_data_base_path}/{folder_name}'
-        expert_data.append(create_bird_dataset(path))
-        student_experts.append(build_student_expert_model(LATENT_DIM, len(os.listdir(path))))
+    # student_experts = []
+    # for i, folder_name in enumerate(os.listdir(expert_data_base_path)):
+    #     path = f'{expert_data_base_path}/{folder_name}'
+    #     expert_data.append(create_bird_dataset(path))
+    #     student_experts.append(build_student_expert_model(LATENT_DIM, len(os.listdir(path))))
     
-    train_arbiter_distillation_with_features(student_arbiter, arbiter, rl_data[0])
+    # train_arbiter_distillation_with_features(student_arbiter, arbiter, rl_data[0])
 
     # for i in range(len(experts)):
     #     train_arbiter_distillation_with_features(student_experts[i], experts[i], expert_data[i][0])

@@ -90,7 +90,10 @@ def train_arbiter_rl(arbiter,
             
             # Store old action probabilities
             action_probs = tf.nn.softmax(policy_logits)
+            action_probs = tf.cast(action_probs, tf.float32)
+
             action_masks = tf.one_hot(actions, NUM_ACTIONS)
+
             old_probs = tf.reduce_sum(action_probs * action_masks, axis=1)
             
             # Calculate rewards (CPU loop but minimal)
@@ -170,6 +173,10 @@ def train_arbiter_rl(arbiter,
                             with tf.GradientTape() as tape:
                                 # Forward pass
                                 _, new_policy, new_values = arbiter(mini_batch['inputs'], training=True)
+
+                                new_policy = tf.cast(new_policy, tf.float32)
+                                new_values = tf.cast(new_values, tf.float32)
+
                                 new_probs_all = tf.nn.softmax(new_policy)
                                 
                                 # Compute advantages
@@ -192,7 +199,7 @@ def train_arbiter_rl(arbiter,
                                 entropy = -tf.reduce_mean(
                                     tf.reduce_sum(new_probs_all * tf.math.log(new_probs_all + 1e-10), axis=1)
                                 )
-                                
+
                                 total_loss = policy_loss + value_coef * value_loss - entropy_coef * entropy
                             
                             # Apply gradients
@@ -224,34 +231,6 @@ def train_arbiter_rl(arbiter,
                     # Clear trajectory after update
                     del all_rewards, all_actions, all_old_probs, all_inputs, all_returns, update_dataset
                 
-                else:  # REINFORCE
-                    # Concatenate trajectory
-                    all_rewards = tf.concat(trajectory_rewards, axis=0)
-                    all_actions = tf.concat(trajectory_actions, axis=0)
-                    all_inputs = tf.concat(trajectory_inputs, axis=0)
-                    
-                    with tf.GradientTape() as tape:
-                        _, logits, values = arbiter(all_inputs, training=True)
-                        
-                        advantages = all_rewards - tf.squeeze(values)
-                        
-                        # Policy loss
-                        action_probs = tf.nn.softmax(logits)
-                        action_masks = tf.one_hot(all_actions, NUM_ACTIONS)
-                        selected_probs = tf.reduce_sum(action_probs * action_masks, axis=1)
-                        log_probs = tf.math.log(selected_probs + 1e-10)
-                        policy_loss = -tf.reduce_mean(log_probs * tf.stop_gradient(advantages))
-                        
-                        # Value loss
-                        value_loss = tf.reduce_mean(tf.square(all_rewards - tf.squeeze(values)))
-                        
-                        total_loss = policy_loss + 0.5 * value_loss
-                    
-                    grads = tape.gradient(total_loss, arbiter.trainable_variables)
-                    optimizer.apply_gradients(zip(grads, arbiter.trainable_variables))
-                    
-                    del all_rewards, all_actions, all_inputs
-                
                 # Clear trajectory buffers
                 trajectory_rewards = []
                 trajectory_actions = []
@@ -263,13 +242,15 @@ def train_arbiter_rl(arbiter,
                 # Only clear session periodically, not every update
                 if episode_batches % 10 == 0:
                     tf.keras.backend.clear_session()
+
+        arbiter.save_weights(f'./arbiter.weights.h5')
         
         # Episode summary
         if episode % 10 == 0:
             avg_episode_reward = episode_total_reward / episode_batches
             print(f"\n=== Episode {episode} Complete: Avg Reward={avg_episode_reward:.4f} ===\n")
             
-def train_expert_supervised(arbiter, expert, train_data, val_data, epochs=50):
+def train_expert_supervised(arbiter, expert, expert_id, train_data, val_data, epochs=100):
     """Train expert models with supervised learning"""    
     print(f"\nTraining Expert")
     
@@ -341,6 +322,8 @@ def train_expert_supervised(arbiter, expert, train_data, val_data, epochs=50):
             })
         except:
             pass
+
+        expert.load_weights(f'./expert_{expert_id}.weights.h5')
         
         print(f"Epoch {epoch}: Train Loss={np.mean(train_loss):.4f}, "
               f"Train Acc={np.mean(train_acc):.4f}, "
